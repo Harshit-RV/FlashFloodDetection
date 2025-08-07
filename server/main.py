@@ -87,33 +87,47 @@ always return JSON format data without any filler words as I'm directly going to
 
 @app.route('/upload', methods=['POST'])
 def upload_image():
-    if 'image' not in request.files or 'metadata' not in request.files:
-        return 'Request is missing image or metadata', 400
+    try:
+        if 'image' not in request.files or 'metadata' not in request.files:
+            return 'Request is missing image or metadata', 400
+        
+        image = request.files['image']
     
-    image = request.files['image']
-   
-    if image.filename == '':
-        print("No selected file")
-        return 'No selected file', 400
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{timestamp}.jpg"
-    filepath = os.path.join(UPLOAD_FOLDER, filename)
-    image.save(filepath)
+        if image.filename == '':
+            print("No selected file")
+            return 'No selected file', 400
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{timestamp}.jpg"
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        image.save(filepath)
 
-    responseFromGemini = predict(filepath)
-    responseFromGemini = json.loads(responseFromGemini)
+        responseFromGemini = predict(filepath)
+        responseFromGemini = json.loads(responseFromGemini)
 
-    metadata = request.files['metadata']
-    metadata = json.loads(metadata.read())
+        metadata = request.files['metadata']
+        metadata = json.loads(metadata.read())
 
-    if collection.find_one({
-        "id": metadata["id"]
-    }):
-        collection.update_one({
+        if collection.find_one({
             "id": metadata["id"]
-        }, {
-            "$set": {
+        }):
+            collection.update_one({
+                "id": metadata["id"]
+            }, {
+                "$set": {
+                    "lat": metadata["lat"],
+                    "lng": metadata["long"],
+                    "title": metadata["location"],
+                    "status": "red" if responseFromGemini["isFlood"] else "green",
+                    "image": filepath,
+                    "description": responseFromGemini["description"],
+                    "imageDescription": responseFromGemini["imageDescription"],
+                    "severity": responseFromGemini["severity"],
+                }
+            }, upsert=True)
+        else:
+            collection.insert_one({
+                "id": metadata["id"],
                 "lat": metadata["lat"],
                 "lng": metadata["long"],
                 "title": metadata["location"],
@@ -122,22 +136,11 @@ def upload_image():
                 "description": responseFromGemini["description"],
                 "imageDescription": responseFromGemini["imageDescription"],
                 "severity": responseFromGemini["severity"],
-            }
-        }, upsert=True)
-    else:
-        collection.insert_one({
-            "id": metadata["id"],
-            "lat": metadata["lat"],
-            "lng": metadata["long"],
-            "title": metadata["location"],
-            "status": "red" if responseFromGemini["isFlood"] else "green",
-            "image": filepath,
-            "description": responseFromGemini["description"],
-            "imageDescription": responseFromGemini["imageDescription"],
-            "severity": responseFromGemini["severity"],
-        })
+            })
 
-    return jsonify({"message": "Image uploaded successfully"}), 200
+        return jsonify({"message": "Image uploaded successfully"}), 200
+    except Exception as e:
+        print(e)
 
 @app.route('/locations')
 def locations():
