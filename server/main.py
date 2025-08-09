@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
+import sys
 from datetime import datetime
 import base64
 import os
@@ -10,50 +11,111 @@ import json
 from pymongo import MongoClient
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
+import logging
+
+# Configure logging for Render.com visibility
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Force Python to be unbuffered for immediate log visibility on Render
+os.environ['PYTHONUNBUFFERED'] = '1'
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
 
 
 app = Flask(__name__)
 CORS(app)
 load_dotenv()
+
+# Configure Flask logging to use the same logger
+app.logger.handlers = logger.handlers
+app.logger.setLevel(logging.INFO)
+
+# Add startup message
+logger.info("=== FLASK APPLICATION STARTING ===")
 UPLOAD_FOLDER = '/tmp/files'
 
+# Create upload directory
+try:
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    logger.info(f"Upload folder created/verified: {UPLOAD_FOLDER}")
+except Exception as e:
+    logger.error(f"Error creating upload folder: {e}")
 
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-MONGO_URL=os.getenv('MONGO_URI')
+# Environment variables with validation and detailed logging
+MONGO_URL = os.getenv('MONGO_URI')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
-client = MongoClient(MONGO_URL)
-db = client["flood_detection"]
-collection = db["flood_detection"]
+logger.info("=== ENVIRONMENT CHECK ===")
+logger.info(f"MONGO_URI set: {'Yes' if MONGO_URL else 'No'}")
+logger.info(f"GEMINI_API_KEY set: {'Yes' if GEMINI_API_KEY else 'No'}")
+
+if not MONGO_URL:
+    logger.error("ERROR: MONGO_URI environment variable is not set!")
+    raise ValueError("MONGO_URI environment variable is required")
+if not GEMINI_API_KEY:
+    logger.error("ERROR: GEMINI_API_KEY environment variable is not set!")
+    raise ValueError("GEMINI_API_KEY environment variable is required")
+
+# Database connection with error handling
+try:
+    client = MongoClient(MONGO_URL)
+    # Test the connection
+    client.admin.command('ping')
+    db = client["flood_detection"]
+    collection = db["flood_detection"]
+    logger.info("MongoDB connection successful!")
+except Exception as e:
+    logger.error(f"MongoDB connection failed: {e}")
+    raise
 
 
 def predict(file_path):
-    client = genai.Client(
-        api_key = os.getenv('GEMINI_API_KEY')
-    )
+    logger.info(f"Starting AI prediction for file: {file_path}")
+    try:
+        client = genai.Client(
+            api_key=GEMINI_API_KEY
+        )
+        logger.info("Gemini client initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize Gemini client: {e}")
+        raise
 
-    files = [
-        client.files.upload(file=file_path),
-    ]
+    try:
+        files = [
+            client.files.upload(file=file_path),
+        ]
+        logger.info(f"File uploaded to Gemini successfully. URI: {files[0].uri}")
+    except Exception as e:
+        logger.error(f"Failed to upload file to Gemini: {e}")
+        raise
 
-    model = "gemini-2.0-flash"
-    contents = [
-        types.Content(
-            role="user",
-            parts=[
-                types.Part.from_uri(
-                    file_uri=files[0].uri,
-                    mime_type=files[0].mime_type,
-                ),
-            ],
-        ),
-    ]
-    generate_content_config = types.GenerateContentConfig(
-        thinking_config = types.ThinkingConfig(
-            thinking_budget=0,
-        ),
-        response_mime_type="application/json",
-        system_instruction=[
-            types.Part.from_text(text="""Given any image, return whether the image seems to be captured during a flood and return your reasoning. Also rate how severe the flood is based on the destruction nearby, the water level and other factors.
+    try:
+        model = "gemini-2.0-flash"
+        contents = [
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_uri(
+                        file_uri=files[0].uri,
+                        mime_type=files[0].mime_type,
+                    ),
+                ],
+            ),
+        ]
+        generate_content_config = types.GenerateContentConfig(
+            thinking_config = types.ThinkingConfig(
+                thinking_budget=0,
+            ),
+            response_mime_type="application/json",
+            system_instruction=[
+                types.Part.from_text(text="""Given any image, return whether the image seems to be captured during a flood and return your reasoning. Also rate how severe the flood is based on the destruction nearby, the water level and other factors.
 0 being non-harmful normal flash floods
 100 being crazy harsh floods that destroys infra
 
@@ -74,29 +136,44 @@ example response:
 
 always return JSON format data without any filler words as I'm directly going to run JSON.loads or JSON.parse on this response. THIS IS A STRICT INSTRUCTION AS THIS MISTAKE WILL BREAK THE FLOW OF THE CODE.
 """),
-        ],
-    )
+            ],
+        )
+        logger.info("Gemini content configuration prepared")
+    except Exception as e:
+        logger.error(f"Failed to prepare Gemini configuration: {e}")
+        raise
 
-    response = client.models.generate_content(
-        model=model,
-        contents=contents,
-        config=generate_content_config,
-    )
-    return response.text
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=contents,
+            config=generate_content_config,
+        )
+        logger.info(f"Gemini response received. Length: {len(response.text) if response.text else 0}")
+        return response.text
+    except Exception as e:
+        logger.error(f"Failed to generate content with Gemini: {e}")
+        raise
 
 
 @app.route('/upload', methods=['POST'])
 def upload_image():
+    logger.info("=== UPLOAD REQUEST STARTED ===")
     try: 
+        logger.info("Checking request files...")
         if 'image' not in request.files or 'metadata' not in request.files:
+            logger.warning("Missing files in request")
             return jsonify({"error": "Request is missing image or metadata"}), 400
         image = request.files['image']
+        logger.info(f"Image file received: {image.filename}")
 
         if image.filename == '':
-            print("No selected file")
+            logger.warning("No selected file")
             return jsonify({"error": "No selected file"}), 400
     except Exception as e:
-        print("error in body parsing: ", e)
+        logger.error(f"Error in request parsing: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": "Failed to parse request body"}), 400
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -105,32 +182,54 @@ def upload_image():
 
     try:
         image.save(filepath)
-        print(f"File saved to: {filepath}")
+        logger.info(f"File saved to: {filepath}")
     except Exception as e:
-        print("error in saving file: ", e)
+        logger.error(f"Error in saving file: {e}")
         return jsonify({"error": "Failed to save uploaded file"}), 500
 
     try: 
+        logger.info("Starting AI processing...")
         responseFromGemini = predict(filepath)
+        logger.info(f"Raw Gemini response: {responseFromGemini[:200]}...")
         responseFromGemini = json.loads(responseFromGemini)
-        print("Gemini response received and parsed successfully")
+        logger.info("Gemini response received and parsed successfully")
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error in Gemini response: {e}")
+        logger.error(f"Raw response was: {responseFromGemini if 'responseFromGemini' in locals() else 'No response received'}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "Failed to parse AI response"}), 500
     except Exception as e:
-        print("error in gemini response fetch and parse operations: ", e)
+        logger.error(f"Error in Gemini processing: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": "Failed to process image with AI"}), 500
 
     try:
+        logger.info("Parsing metadata...")
         metadata = request.files['metadata']
-        metadata = json.loads(metadata.read())
-        print("Metadata parsed successfully")
+        metadata_content = metadata.read()
+        logger.info(f"Metadata content: {metadata_content}")
+        metadata = json.loads(metadata_content)
+        logger.info(f"Metadata parsed successfully: {metadata}")
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error in metadata: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "Invalid JSON in metadata"}), 400
     except Exception as e:
-        print("error in metadata input parsing: ", e)
+        logger.error(f"Error in metadata parsing: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": "Failed to parse metadata"}), 400
 
     try: 
+        logger.info("Saving to database...")
         # Store relative path instead of absolute path for better portability
         relative_filepath = f"files/{filename}"
         
         if collection.find_one({"id": metadata["id"]}):
+            logger.info(f"Updating existing document for ID: {metadata['id']}")
             collection.update_one({
                 "id": metadata["id"]
             }, {
@@ -146,8 +245,9 @@ def upload_image():
                     "timestamp": timestamp
                 }
             }, upsert=True)
-            print("Document updated in database")
+            logger.info("Document updated in database")
         else:
+            logger.info(f"Inserting new document for ID: {metadata['id']}")
             collection.insert_one({
                 "id": metadata["id"],
                 "lat": metadata["lat"],
@@ -160,19 +260,22 @@ def upload_image():
                 "severity": responseFromGemini["severity"],
                 "timestamp": timestamp
             })
-            print("New document inserted in database")
+            logger.info("New document inserted in database")
     except Exception as e:
-        print("error in database operations: ", e)
+        logger.error(f"Error in database operations: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": "Failed to save data to database"}), 500
 
     # Clean up temporary file after processing (optional for /tmp)
     try:
         if os.path.exists(filepath):
             os.remove(filepath)
-            print(f"Temporary file {filepath} cleaned up")
+            logger.info(f"Temporary file {filepath} cleaned up")
     except Exception as e:
-        print(f"Warning: Could not clean up temporary file: {e}")
+        logger.warning(f"Could not clean up temporary file: {e}")
 
+    logger.info("=== UPLOAD REQUEST COMPLETED SUCCESSFULLY ===")
     return jsonify({"message": "Image uploaded successfully", "timestamp": timestamp}), 200
 
 @app.route('/locations')
@@ -182,11 +285,12 @@ def locations():
         docs = []
         for document in all_documents:
             del document["_id"]
-            print(document)
+            logger.debug(f"Location document: {document}")
             docs.append(document)
+        logger.info(f"Retrieved {len(docs)} location documents")
         return jsonify(docs), 200
     except Exception as e:
-        print("error in fetching locations: ", e)
+        logger.error(f"Error in fetching locations: {e}")
         return jsonify({"error": "Failed to fetch locations"}), 500
 
 @app.route('/health')
@@ -195,7 +299,9 @@ def health_check():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 3000))
-    app.run(host='0.0.0.0', port=port)
+    logger.info(f"Starting Flask server on port {port}")
+    logger.info("All systems initialized successfully!")
+    app.run(host='0.0.0.0', port=port, debug=False)
 
 
 
