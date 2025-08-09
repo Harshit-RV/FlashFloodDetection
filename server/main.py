@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 app = Flask(__name__)
 CORS(app)
 load_dotenv()
-UPLOAD_FOLDER = 'files'
+UPLOAD_FOLDER = '/tmp/files'
 
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -89,41 +89,48 @@ always return JSON format data without any filler words as I'm directly going to
 def upload_image():
     try: 
         if 'image' not in request.files or 'metadata' not in request.files:
-            return 'Request is missing image or metadata', 400
+            return jsonify({"error": "Request is missing image or metadata"}), 400
         image = request.files['image']
 
         if image.filename == '':
             print("No selected file")
-            return 'No selected file', 400
+            return jsonify({"error": "No selected file"}), 400
     except Exception as e:
         print("error in body parsing: ", e)
+        return jsonify({"error": "Failed to parse request body"}), 400
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{timestamp}.jpg"
+    filepath = os.path.join(UPLOAD_FOLDER, filename)
 
     try:
-        filename = f"{timestamp}.jpg"
-        filepath = os.path.join(UPLOAD_FOLDER, filename)
         image.save(filepath)
+        print(f"File saved to: {filepath}")
     except Exception as e:
         print("error in saving file: ", e)
+        return jsonify({"error": "Failed to save uploaded file"}), 500
 
     try: 
         responseFromGemini = predict(filepath)
         responseFromGemini = json.loads(responseFromGemini)
+        print("Gemini response received and parsed successfully")
     except Exception as e:
         print("error in gemini response fetch and parse operations: ", e)
-
+        return jsonify({"error": "Failed to process image with AI"}), 500
 
     try:
         metadata = request.files['metadata']
         metadata = json.loads(metadata.read())
+        print("Metadata parsed successfully")
     except Exception as e:
         print("error in metadata input parsing: ", e)
+        return jsonify({"error": "Failed to parse metadata"}), 400
 
     try: 
-        if collection.find_one({
-            "id": metadata["id"]
-        }):
+        # Store relative path instead of absolute path for better portability
+        relative_filepath = f"files/{filename}"
+        
+        if collection.find_one({"id": metadata["id"]}):
             collection.update_one({
                 "id": metadata["id"]
             }, {
@@ -132,12 +139,14 @@ def upload_image():
                     "lng": metadata["long"],
                     "title": metadata["location"],
                     "status": "red" if responseFromGemini["isFlood"] else "green",
-                    "image": filepath,
+                    "image": relative_filepath,
                     "description": responseFromGemini["description"],
                     "imageDescription": responseFromGemini["imageDescription"],
                     "severity": responseFromGemini["severity"],
+                    "timestamp": timestamp
                 }
             }, upsert=True)
+            print("Document updated in database")
         else:
             collection.insert_one({
                 "id": metadata["id"],
@@ -145,25 +154,48 @@ def upload_image():
                 "lng": metadata["long"],
                 "title": metadata["location"],
                 "status": "red" if responseFromGemini["isFlood"] else "green",
-                "image": filepath,
+                "image": relative_filepath,
                 "description": responseFromGemini["description"],
                 "imageDescription": responseFromGemini["imageDescription"],
                 "severity": responseFromGemini["severity"],
+                "timestamp": timestamp
             })
+            print("New document inserted in database")
     except Exception as e:
-        print("error in sending out response: ", e)
+        print("error in database operations: ", e)
+        return jsonify({"error": "Failed to save data to database"}), 500
 
-    return jsonify({"message": "Image uploaded successfully"}), 200
+    # Clean up temporary file after processing (optional for /tmp)
+    try:
+        if os.path.exists(filepath):
+            os.remove(filepath)
+            print(f"Temporary file {filepath} cleaned up")
+    except Exception as e:
+        print(f"Warning: Could not clean up temporary file: {e}")
+
+    return jsonify({"message": "Image uploaded successfully", "timestamp": timestamp}), 200
 
 @app.route('/locations')
 def locations():
-    all_documents = list(collection.find({}))
-    docs = []
-    for document in all_documents:
-        del document["_id"]
-        print(document)
-        docs.append(document)
-    return jsonify(docs), 200
+    try:
+        all_documents = list(collection.find({}))
+        docs = []
+        for document in all_documents:
+            del document["_id"]
+            print(document)
+            docs.append(document)
+        return jsonify(docs), 200
+    except Exception as e:
+        print("error in fetching locations: ", e)
+        return jsonify({"error": "Failed to fetch locations"}), 500
+
+@app.route('/health')
+def health_check():
+    return jsonify({"status": "healthy", "message": "Server is running"}), 200
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=3000)
+    port = int(os.environ.get('PORT', 3000))
+    app.run(host='0.0.0.0', port=port)
+
+
+
