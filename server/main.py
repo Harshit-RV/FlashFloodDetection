@@ -87,27 +87,40 @@ always return JSON format data without any filler words as I'm directly going to
 
 @app.route('/upload', methods=['POST'])
 def upload_image():
-    try:
+    try: 
         if 'image' not in request.files or 'metadata' not in request.files:
             return 'Request is missing image or metadata', 400
-        
         image = request.files['image']
-    
+
         if image.filename == '':
             print("No selected file")
             return 'No selected file', 400
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    except Exception as e:
+        print("error in body parsing: ", e)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    try:
         filename = f"{timestamp}.jpg"
         filepath = os.path.join(UPLOAD_FOLDER, filename)
         image.save(filepath)
+    except Exception as e:
+        print("error in saving file: ", e)
 
+    try: 
         responseFromGemini = predict(filepath)
         responseFromGemini = json.loads(responseFromGemini)
+    except Exception as e:
+        print("error in gemini response fetch and parse operations: ", e)
 
+
+    try:
         metadata = request.files['metadata']
         metadata = json.loads(metadata.read())
+    except Exception as e:
+        print("error in metadata input parsing: ", e)
 
+    try: 
         if collection.find_one({
             "id": metadata["id"]
         }):
@@ -137,10 +150,10 @@ def upload_image():
                 "imageDescription": responseFromGemini["imageDescription"],
                 "severity": responseFromGemini["severity"],
             })
-
-        return jsonify({"message": "Image uploaded successfully"}), 200
     except Exception as e:
-        print(e)
+        print("error in sending out response: ", e)
+
+    return jsonify({"message": "Image uploaded successfully"}), 200
 
 @app.route('/locations')
 def locations():
@@ -154,6 +167,3 @@ def locations():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=3000)
-
-
-
