@@ -110,9 +110,6 @@ def predict(file_path):
             ),
         ]
         generate_content_config = types.GenerateContentConfig(
-            thinking_config = types.ThinkingConfig(
-                thinking_budget=0,
-            ),
             response_mime_type="application/json",
             system_instruction=[
                 types.Part.from_text(text="""Given any image, return whether the image seems to be captured during a flood and return your reasoning. Also rate how severe the flood is based on the destruction nearby, the water level and other factors.
